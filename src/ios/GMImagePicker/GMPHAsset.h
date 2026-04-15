@@ -19,6 +19,7 @@ return ( PROPERTY_TYPE ) objc_getAssociatedObject(self, &(kProperty##PROPERTY_NA
 objc_setAssociatedObject(self, &kProperty##PROPERTY_NAME , PROPERTY_NAME , OBJC_ASSOCIATION_RETAIN); \
 } \
 
+#import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 
 #import <Photos/PHAsset.h>
