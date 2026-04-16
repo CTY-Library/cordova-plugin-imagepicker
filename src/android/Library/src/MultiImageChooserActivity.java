@@ -79,6 +79,10 @@ import android.widget.ImageView;
 
 import androidx.appcompat.app.ActionBar;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.view.OnApplyWindowInsetsListener;
+import androidx.core.view.ViewCompat;
+import androidx.core.view.WindowCompat;
+import androidx.core.view.WindowInsetsCompat;
 
 public class MultiImageChooserActivity extends AppCompatActivity implements
         OnItemClickListener,
@@ -122,12 +126,14 @@ public class MultiImageChooserActivity extends AppCompatActivity implements
     private FakeR fakeR;
     private View abDoneView;
     private View abDiscardView;
+    private View actionBarCustomView;
 
     private ProgressDialog progress;
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        WindowCompat.setDecorFitsSystemWindows(getWindow(), true);
         fakeR = new FakeR(this);
         setContentView(fakeR.getId("layout", "multiselectorgrid"));
         fileNames.clear();
@@ -145,6 +151,7 @@ public class MultiImageChooserActivity extends AppCompatActivity implements
         colWidth = width / 4;
 
         GridView gridView = (GridView) findViewById(fakeR.getId("id", "gridview"));
+        configureGridViewInsets(gridView);
         gridView.setOnItemClickListener(this);
         gridView.setOnScrollListener(new OnScrollListener() {
             private int lastFirstItem = 0;
@@ -356,12 +363,12 @@ public class MultiImageChooserActivity extends AppCompatActivity implements
          * limitations under the License.
          */
         LayoutInflater inflater = (LayoutInflater) getSystemService(LAYOUT_INFLATER_SERVICE);
-        View customActionBarView = inflater.inflate(
+        actionBarCustomView = inflater.inflate(
                 fakeR.getId("layout", "actionbar_custom_view_done_discard"),
                 null
         );
 
-        abDoneView = customActionBarView.findViewById(fakeR.getId("id", "actionbar_done"));
+        abDoneView = actionBarCustomView.findViewById(fakeR.getId("id", "actionbar_done"));
         abDoneView.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -370,7 +377,7 @@ public class MultiImageChooserActivity extends AppCompatActivity implements
             }
         });
 
-        abDiscardView = customActionBarView.findViewById(fakeR.getId("id", "actionbar_discard"));
+        abDiscardView = actionBarCustomView.findViewById(fakeR.getId("id", "actionbar_discard"));
         abDiscardView.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -387,11 +394,66 @@ public class MultiImageChooserActivity extends AppCompatActivity implements
                             | ActionBar.DISPLAY_SHOW_HOME
                             | ActionBar.DISPLAY_SHOW_TITLE
             );
-            actionBar.setCustomView(customActionBarView, new ActionBar.LayoutParams(
+            actionBar.setCustomView(actionBarCustomView, new ActionBar.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.MATCH_PARENT
             ));
         }
+    }
+
+    private void configureGridViewInsets(final GridView gridView) {
+        final int basePaddingLeft = gridView.getPaddingLeft();
+        final int basePaddingTop = gridView.getPaddingTop();
+        final int basePaddingRight = gridView.getPaddingRight();
+        final int basePaddingBottom = gridView.getPaddingBottom();
+
+        gridView.setClipToPadding(false);
+        ViewCompat.setOnApplyWindowInsetsListener(gridView, new OnApplyWindowInsetsListener() {
+            @Override
+            public WindowInsetsCompat onApplyWindowInsets(final View view, final WindowInsetsCompat insets) {
+                final int bottomInset = insets.getInsets(WindowInsetsCompat.Type.systemBars()).bottom;
+                view.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        int overlap = getHeaderOverlap(view);
+                        view.setPadding(
+                                basePaddingLeft,
+                                basePaddingTop + overlap,
+                                basePaddingRight,
+                                basePaddingBottom + bottomInset
+                        );
+                    }
+                });
+                return insets;
+            }
+        });
+        gridView.post(new Runnable() {
+            @Override
+            public void run() {
+                int overlap = getHeaderOverlap(gridView);
+                gridView.setPadding(
+                        basePaddingLeft,
+                        basePaddingTop + overlap,
+                        basePaddingRight,
+                        basePaddingBottom
+                );
+            }
+        });
+        ViewCompat.requestApplyInsets(gridView);
+    }
+
+    private int getHeaderOverlap(View contentView) {
+        if (actionBarCustomView == null || actionBarCustomView.getHeight() == 0) {
+            return 0;
+        }
+
+        int[] contentLocation = new int[2];
+        int[] headerLocation = new int[2];
+        contentView.getLocationInWindow(contentLocation);
+        actionBarCustomView.getLocationInWindow(headerLocation);
+
+        int headerBottom = headerLocation[1] + actionBarCustomView.getHeight();
+        return Math.max(0, headerBottom - contentLocation[1]);
     }
 
     private String getImageName(int position) {
