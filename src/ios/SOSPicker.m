@@ -8,11 +8,22 @@
 
 #import "SOSPicker.h"
 
+#import <ImageIO/ImageIO.h>
+
+#if __has_include(<UniformTypeIdentifiers/UniformTypeIdentifiers.h>)
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+#endif
+
+#if __has_include(<MobileCoreServices/MobileCoreServices.h>)
+#import <MobileCoreServices/MobileCoreServices.h>
+#endif
 
 #import "GMImagePickerController.h"
 #import "GMFetchItem.h"
 
 #define CDV_PHOTO_PREFIX @"cdv_photo_"
+#define CDV_THUMB_PREFIX @"cdv_thumb_"
+#define CDV_TEMP_FILE_MAX_AGE (90 * 24 * 60 * 60)
 
 typedef enum : NSUInteger {
     FILE_URI = 0,
@@ -25,6 +36,268 @@ typedef enum : NSUInteger {
 @implementation SOSPicker
 
 @synthesize callbackId;
+
+static CFStringRef SOSPickerJPEGImageType(void)
+{
+    if (@available(iOS 14.0, *)) {
+#if __has_include(<UniformTypeIdentifiers/UniformTypeIdentifiers.h>)
+        return (__bridge CFStringRef)UTTypeJPEG.identifier;
+#endif
+    }
+
+#if __has_include(<MobileCoreServices/MobileCoreServices.h>)
+    return kUTTypeJPEG;
+#else
+    return CFSTR("public.jpeg");
+#endif
+}
+
+static BOOL SOSPickerHasPrefix(NSString *fileName)
+{
+    return [fileName hasPrefix:CDV_PHOTO_PREFIX] || [fileName hasPrefix:CDV_THUMB_PREFIX];
+}
+
+- (CGFloat)jpegCompressionQuality
+{
+    CGFloat quality = self.quality / 100.0f;
+    return MAX(0.0f, MIN(1.0f, quality));
+}
+
+- (void)cleanupExpiredTemporaryFiles
+{
+    NSString *temporaryDirectory = [NSTemporaryDirectory() stringByStandardizingPath];
+    NSArray *contents = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:temporaryDirectory error:nil];
+    if (contents == nil) {
+        return;
+    }
+
+    NSDate *expirationDate = [NSDate dateWithTimeIntervalSinceNow:-CDV_TEMP_FILE_MAX_AGE];
+    for (NSString *fileName in contents) {
+        if (!SOSPickerHasPrefix(fileName)) {
+            continue;
+        }
+
+        NSString *filePath = [temporaryDirectory stringByAppendingPathComponent:fileName];
+        NSDictionary *attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:filePath error:nil];
+        NSDate *modifiedDate = [attributes fileModificationDate];
+        if (modifiedDate == nil || [modifiedDate compare:expirationDate] == NSOrderedDescending) {
+            continue;
+        }
+
+        [[NSFileManager defaultManager] removeItemAtPath:filePath error:nil];
+    }
+}
+
+- (id)formattedResultWithPrimaryValue:(NSString *)primaryValue thumbValue:(NSString *)thumbValue
+{
+    if (!self.includeThumb) {
+        return primaryValue;
+    }
+
+    NSMutableDictionary *entry = [NSMutableDictionary dictionaryWithObject:primaryValue forKey:@"uri"];
+    if (thumbValue != nil) {
+        [entry setObject:thumbValue forKey:@"thumb"];
+    }
+
+    return entry;
+}
+
+- (NSString *)thumbValueForItem:(GMFetchItem *)item targetSize:(CGSize)targetSize jpegQuality:(CGFloat)jpegQuality
+{
+    if (item.image_thumb == nil) {
+        return nil;
+    }
+
+    if (self.outputType == BASE64_STRING) {
+        NSData *data = [NSData dataWithContentsOfFile:item.image_thumb];
+        return data ? [data base64EncodedStringWithOptions:0] : nil;
+    }
+
+    return [[NSURL fileURLWithPath:item.image_thumb] absoluteString];
+}
+
+- (BOOL)readPixelWidth:(size_t *)pixelWidth pixelHeight:(size_t *)pixelHeight fromImageSource:(CGImageSourceRef)source
+{
+    if (pixelWidth == NULL || pixelHeight == NULL || source == NULL) {
+        return NO;
+    }
+
+    *pixelWidth = 0;
+    *pixelHeight = 0;
+
+    CFDictionaryRef properties = CGImageSourceCopyPropertiesAtIndex(source, 0, NULL);
+    if (properties == NULL) {
+        return NO;
+    }
+
+    CFNumberRef widthRef = CFDictionaryGetValue(properties, kCGImagePropertyPixelWidth);
+    CFNumberRef heightRef = CFDictionaryGetValue(properties, kCGImagePropertyPixelHeight);
+
+    if (widthRef != NULL) {
+        CFNumberGetValue(widthRef, kCFNumberSInt64Type, pixelWidth);
+    }
+
+    if (heightRef != NULL) {
+        CFNumberGetValue(heightRef, kCFNumberSInt64Type, pixelHeight);
+    }
+
+    CFRelease(properties);
+    return (*pixelWidth > 0 && *pixelHeight > 0);
+}
+
+- (NSInteger)maxPixelSizeForPixelWidth:(size_t)pixelWidth pixelHeight:(size_t)pixelHeight targetSize:(CGSize)targetSize
+{
+    if (pixelWidth == 0 || pixelHeight == 0) {
+        return 0;
+    }
+
+    CGFloat width = (CGFloat)pixelWidth;
+    CGFloat height = (CGFloat)pixelHeight;
+    CGFloat targetWidth = targetSize.width;
+    CGFloat targetHeight = targetSize.height;
+
+    if (targetWidth <= 0.0f && targetHeight <= 0.0f) {
+        return 0;
+    }
+
+    CGFloat widthFactor = targetWidth > 0.0f ? targetWidth / width : 0.0f;
+    CGFloat heightFactor = targetHeight > 0.0f ? targetHeight / height : 0.0f;
+    CGFloat scaleFactor = 0.0f;
+
+    if (widthFactor == 0.0f) {
+        scaleFactor = heightFactor;
+    } else if (heightFactor == 0.0f) {
+        scaleFactor = widthFactor;
+    } else if (widthFactor > heightFactor) {
+        scaleFactor = heightFactor;
+    } else {
+        scaleFactor = widthFactor;
+    }
+
+    if (scaleFactor <= 0.0f || scaleFactor >= 1.0f) {
+        return 0;
+    }
+
+    size_t scaledWidth = (size_t)floor(width * scaleFactor);
+    size_t scaledHeight = (size_t)floor(height * scaleFactor);
+    return (NSInteger)MAX((size_t)1, MAX(scaledWidth, scaledHeight));
+}
+
+- (BOOL)addJPEGFromSource:(CGImageSourceRef)source
+            toDestination:(CGImageDestinationRef)destination
+               targetSize:(CGSize)targetSize
+             jpegQuality:(CGFloat)quality
+{
+    if (source == NULL || destination == NULL) {
+        return NO;
+    }
+
+    size_t pixelWidth = 0;
+    size_t pixelHeight = 0;
+    NSInteger maxPixelSize = 0;
+
+    if ([self readPixelWidth:&pixelWidth pixelHeight:&pixelHeight fromImageSource:source]) {
+        maxPixelSize = [self maxPixelSizeForPixelWidth:pixelWidth pixelHeight:pixelHeight targetSize:targetSize];
+    }
+
+    NSDictionary *jpegOptions = @{
+        (NSString *)kCGImageDestinationLossyCompressionQuality: @(quality)
+    };
+
+    if (maxPixelSize == 0) {
+        CGImageDestinationAddImageFromSource(destination, source, 0, (__bridge CFDictionaryRef)jpegOptions);
+        return CGImageDestinationFinalize(destination);
+    }
+
+    NSDictionary *thumbnailOptions = @{
+        (NSString *)kCGImageSourceCreateThumbnailFromImageAlways: (id)kCFBooleanTrue,
+        (NSString *)kCGImageSourceCreateThumbnailWithTransform: (id)kCFBooleanTrue,
+        (NSString *)kCGImageSourceThumbnailMaxPixelSize: @(maxPixelSize),
+        (NSString *)kCGImageSourceShouldCache: (id)kCFBooleanFalse
+    };
+
+    CGImageRef imageRef = CGImageSourceCreateThumbnailAtIndex(source, 0, (__bridge CFDictionaryRef)thumbnailOptions);
+    if (imageRef == NULL) {
+        return NO;
+    }
+
+    CGImageDestinationAddImage(destination, imageRef, (__bridge CFDictionaryRef)jpegOptions);
+    BOOL success = CGImageDestinationFinalize(destination);
+    CGImageRelease(imageRef);
+    return success;
+}
+
+- (NSData *)createJPEGDataFromFile:(NSString *)sourcePath targetSize:(CGSize)targetSize jpegQuality:(CGFloat)quality
+{
+    NSURL *sourceURL = [NSURL fileURLWithPath:sourcePath];
+    CGImageSourceRef source = CGImageSourceCreateWithURL((__bridge CFURLRef)sourceURL, NULL);
+    if (source == NULL) {
+        return nil;
+    }
+
+    NSMutableData *data = [NSMutableData data];
+    CGImageDestinationRef destination = CGImageDestinationCreateWithData((__bridge CFMutableDataRef)data, SOSPickerJPEGImageType(), 1, NULL);
+    if (destination == NULL) {
+        CFRelease(source);
+        return nil;
+    }
+
+    BOOL success = [self addJPEGFromSource:source toDestination:destination targetSize:targetSize jpegQuality:quality];
+    CFRelease(destination);
+    CFRelease(source);
+
+    if (!success) {
+        return nil;
+    }
+
+    return data;
+}
+
+- (BOOL)createResizedImageFromFile:(NSString *)sourcePath targetPath:(NSString *)targetPath targetSize:(CGSize)targetSize jpegQuality:(CGFloat)quality error:(NSError **)error
+{
+    NSURL *sourceURL = [NSURL fileURLWithPath:sourcePath];
+    CGImageSourceRef source = CGImageSourceCreateWithURL((__bridge CFURLRef)sourceURL, NULL);
+    if (source == NULL) {
+        if (error != NULL) {
+            *error = [NSError errorWithDomain:@"SOSPicker" code:1 userInfo:@{NSLocalizedDescriptionKey: @"Could not open source image."}];
+        }
+        return NO;
+    }
+
+    size_t pixelWidth = 0;
+    size_t pixelHeight = 0;
+    NSInteger maxPixelSize = 0;
+
+    if ([self readPixelWidth:&pixelWidth pixelHeight:&pixelHeight fromImageSource:source]) {
+        maxPixelSize = [self maxPixelSizeForPixelWidth:pixelWidth pixelHeight:pixelHeight targetSize:targetSize];
+    }
+
+    if (maxPixelSize == 0 && quality >= 0.999f && (targetSize.width > 0.0f || targetSize.height > 0.0f)) {
+        [[NSFileManager defaultManager] removeItemAtPath:targetPath error:nil];
+        BOOL copied = [[NSFileManager defaultManager] copyItemAtPath:sourcePath toPath:targetPath error:error];
+        CFRelease(source);
+        return copied;
+    }
+
+    NSURL *targetURL = [NSURL fileURLWithPath:targetPath];
+    CGImageDestinationRef destination = CGImageDestinationCreateWithURL((__bridge CFURLRef)targetURL, SOSPickerJPEGImageType(), 1, NULL);
+    if (destination == NULL) {
+        if (error != NULL) {
+            *error = [NSError errorWithDomain:@"SOSPicker" code:2 userInfo:@{NSLocalizedDescriptionKey: @"Could not create destination image."}];
+        }
+        CFRelease(source);
+        return NO;
+    }
+
+    BOOL success = [self addJPEGFromSource:source toDestination:destination targetSize:targetSize jpegQuality:quality];
+    if (!success && error != NULL) {
+        *error = [NSError errorWithDomain:@"SOSPicker" code:3 userInfo:@{NSLocalizedDescriptionKey: @"Could not write destination image."}];
+    }
+
+    CFRelease(destination);
+    CFRelease(source);
+    return success;
+}
 
 - (void) hasReadPermission:(CDVInvokedUrlCommand *)command {
     CDVPluginResult* pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsBool:[PHPhotoLibrary authorizationStatus] == PHAuthorizationStatusAuthorized];
@@ -68,6 +341,7 @@ typedef enum : NSUInteger {
     NSDictionary *options = [command.arguments objectAtIndex: 0];
 
     self.outputType = [[options objectForKey:@"outputType"] integerValue];
+    self.includeThumb = [[options objectForKey:@"includeThumb"] boolValue];
     BOOL allow_video = [[options objectForKey:@"allow_video" ] boolValue ];
     NSInteger maximumImagesCount = [[options objectForKey:@"maximumImagesCount"] integerValue];
     NSString * title = [options objectForKey:@"title"];
@@ -79,6 +353,8 @@ typedef enum : NSUInteger {
     self.width = [[options objectForKey:@"width"] integerValue];
     self.height = [[options objectForKey:@"height"] integerValue];
     self.quality = [[options objectForKey:@"quality"] integerValue];
+
+    [self cleanupExpiredTemporaryFiles];
 
     self.callbackId = command.callbackId;
     [self launchGMImagePicker:allow_video title:title message:message disable_popover:disable_popover maximumImagesCount:maximumImagesCount];
@@ -105,50 +381,6 @@ typedef enum : NSUInteger {
     }
 
     [self.viewController showViewController:picker sender:nil];
-}
-
-
-- (UIImage*)imageByScalingNotCroppingForSize:(UIImage*)anImage toSize:(CGSize)frameSize
-{
-    UIImage* sourceImage = anImage;
-    UIImage* newImage = nil;
-    CGSize imageSize = sourceImage.size;
-    CGFloat width = imageSize.width;
-    CGFloat height = imageSize.height;
-    CGFloat targetWidth = frameSize.width;
-    CGFloat targetHeight = frameSize.height;
-    CGFloat scaleFactor = 0.0;
-    CGSize scaledSize = frameSize;
-
-    if (CGSizeEqualToSize(imageSize, frameSize) == NO) {
-        CGFloat widthFactor = targetWidth / width;
-        CGFloat heightFactor = targetHeight / height;
-
-        // opposite comparison to imageByScalingAndCroppingForSize in order to contain the image within the given bounds
-        if (widthFactor == 0.0) {
-            scaleFactor = heightFactor;
-        } else if (heightFactor == 0.0) {
-            scaleFactor = widthFactor;
-        } else if (widthFactor > heightFactor) {
-            scaleFactor = heightFactor; // scale to fit height
-        } else {
-            scaleFactor = widthFactor; // scale to fit width
-        }
-        scaledSize = CGSizeMake(floor(width * scaleFactor), floor(height * scaleFactor));
-    }
-
-    UIGraphicsBeginImageContext(scaledSize); // this will resize
-
-    [sourceImage drawInRect:CGRectMake(0, 0, scaledSize.width, scaledSize.height)];
-
-    newImage = UIGraphicsGetImageFromCurrentImageContext();
-    if (newImage == nil) {
-        NSLog(@"could not scale image");
-    }
-
-    // pop the context to get back to the default
-    UIGraphicsEndImageContext();
-    return newImage;
 }
 
 
@@ -188,12 +420,15 @@ typedef enum : NSUInteger {
     int i = 1;
     NSString* filePath;
     CDVPluginResult* result = nil;
+    CGFloat jpegQuality = [self jpegCompressionQuality];
 
     for (GMFetchItem *item in fetchArray) {
 
         if ( !item.image_fullsize ) {
             continue;
         }
+
+        NSString *thumbValue = [self thumbValueForItem:item targetSize:targetSize jpegQuality:jpegQuality];
 
         do {
             filePath = [NSString stringWithFormat:@"%@/%@%03d.%@", docsPath, CDV_PHOTO_PREFIX, i++, @"jpg"];
@@ -203,38 +438,47 @@ typedef enum : NSUInteger {
         if (self.width == 0 && self.height == 0) {
             // no scaling required
             if (self.outputType == BASE64_STRING){
-                UIImage* image = [UIImage imageNamed:item.image_fullsize];
-                [result_all addObject:[UIImageJPEGRepresentation(image, self.quality/100.0f) base64EncodedStringWithOptions:0]];
+                if (self.quality == 100) {
+                    data = [NSData dataWithContentsOfFile:item.image_fullsize];
+                } else {
+                    data = [self createJPEGDataFromFile:item.image_fullsize targetSize:CGSizeZero jpegQuality:jpegQuality];
+                }
+
+                if (data == nil) {
+                    result = [CDVPluginResult resultWithStatus:CDVCommandStatus_IO_EXCEPTION messageAsString:@"Could not read image data."];
+                    break;
+                }
+
+                [result_all addObject:[self formattedResultWithPrimaryValue:[data base64EncodedStringWithOptions:0] thumbValue:thumbValue]];
             } else {
                 if (self.quality == 100) {
                     // no scaling, no downsampling, this is the fastest option
-                    [result_all addObject:item.image_fullsize];
+                    [result_all addObject:[self formattedResultWithPrimaryValue:item.image_fullsize thumbValue:thumbValue]];
                 } else {
-                    // resample first
-                    UIImage* image = [UIImage imageNamed:item.image_fullsize];
-                    data = UIImageJPEGRepresentation(image, self.quality/100.0f);
-                    if (![data writeToFile:filePath options:NSAtomicWrite error:&err]) {
+                    if (![self createResizedImageFromFile:item.image_fullsize targetPath:filePath targetSize:CGSizeZero jpegQuality:jpegQuality error:&err]) {
                         result = [CDVPluginResult resultWithStatus:CDVCommandStatus_IO_EXCEPTION messageAsString:[err localizedDescription]];
                         break;
                     } else {
-                        [result_all addObject:[[NSURL fileURLWithPath:filePath] absoluteString]];
+                        [result_all addObject:[self formattedResultWithPrimaryValue:[[NSURL fileURLWithPath:filePath] absoluteString] thumbValue:thumbValue]];
                     }
                 }
             }
         } else {
             // scale
-            UIImage* image = [UIImage imageNamed:item.image_fullsize];
-            UIImage* scaledImage = [self imageByScalingNotCroppingForSize:image toSize:targetSize];
-            data = UIImageJPEGRepresentation(scaledImage, self.quality/100.0f);
+            if(self.outputType == BASE64_STRING){
+                data = [self createJPEGDataFromFile:item.image_fullsize targetSize:targetSize jpegQuality:jpegQuality];
+                if (data == nil) {
+                    result = [CDVPluginResult resultWithStatus:CDVCommandStatus_IO_EXCEPTION messageAsString:@"Could not resize image data."];
+                    break;
+                }
 
-            if (![data writeToFile:filePath options:NSAtomicWrite error:&err]) {
-                result = [CDVPluginResult resultWithStatus:CDVCommandStatus_IO_EXCEPTION messageAsString:[err localizedDescription]];
-                break;
+                [result_all addObject:[self formattedResultWithPrimaryValue:[data base64EncodedStringWithOptions:0] thumbValue:thumbValue]];
             } else {
-                if(self.outputType == BASE64_STRING){
-                    [result_all addObject:[data base64EncodedStringWithOptions:0]];
+                if (![self createResizedImageFromFile:item.image_fullsize targetPath:filePath targetSize:targetSize jpegQuality:jpegQuality error:&err]) {
+                    result = [CDVPluginResult resultWithStatus:CDVCommandStatus_IO_EXCEPTION messageAsString:[err localizedDescription]];
+                    break;
                 } else {
-                    [result_all addObject:[[NSURL fileURLWithPath:filePath] absoluteString]];
+                    [result_all addObject:[self formattedResultWithPrimaryValue:[[NSURL fileURLWithPath:filePath] absoluteString] thumbValue:thumbValue]];
                 }
             }
         }

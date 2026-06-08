@@ -73,12 +73,17 @@ window.imagePicker.getPictures(
         // available options are 
         // window.imagePicker.OutputType.FILE_URI (0) or 
         // window.imagePicker.OutputType.BASE64_STRING (1)
-        outputType: int
+        outputType: int,
+
+        // Keep the old return format by default.
+        // When true, each result becomes an object:
+        // { uri: <full result>, thumb: <thumbnail result> }
+        includeThumb: bool
     };
     
 ### Note for Android Use
 
-When outputType is FILE_URI the plugin returns images that are stored in a temporary directory.  These images will often not be deleted automatically though.  The files should be moved or deleted after you get their filepaths in javascript. If Base64 Strings are being returned, there is nothing to clean up.
+When outputType is FILE_URI the plugin returns images that are stored in a temporary directory. These images are not intended for permanent storage, so the files should be moved or deleted after you get their filepaths in javascript. Plugin-generated temporary files older than roughly 3 months are cleaned up automatically when the picker is opened. If Base64 Strings are being returned, there is nothing to clean up.
 
 ## Android 6 (M) Permissions
 On Android 6 you need to request permission to read external storage at runtime when targeting API level 23+.

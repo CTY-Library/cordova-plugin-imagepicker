@@ -96,6 +96,13 @@ public class MultiImageChooserActivity extends AppCompatActivity implements
     public static final String HEIGHT_KEY = "HEIGHT";
     public static final String QUALITY_KEY = "QUALITY";
     public static final String OUTPUT_TYPE_KEY = "OUTPUT_TYPE";
+    public static final String INCLUDE_THUMB_KEY = "INCLUDE_THUMB";
+
+    private static final String CDV_PHOTO_PREFIX = "cdv_photo_";
+    private static final String CDV_THUMB_PREFIX = "cdv_thumb_";
+    private static final long CDV_TEMP_FILE_MAX_AGE_MS = 90L * 24L * 60L * 60L * 1000L;
+    private static final int THUMB_MAX_SIZE = 256;
+    private static final int THUMB_MAX_QUALITY = 80;
 
     private ImageAdapter ia;
 
@@ -117,6 +124,7 @@ public class MultiImageChooserActivity extends AppCompatActivity implements
     private int desiredHeight;
     private int quality;
     private OutputType outputType;
+    private boolean includeThumb;
 
     private final ImageFetcher fetcher = new ImageFetcher();
 
@@ -144,6 +152,9 @@ public class MultiImageChooserActivity extends AppCompatActivity implements
         quality = getIntent().getIntExtra(QUALITY_KEY, 0);
         maxImageCount = maxImages;
         outputType = OutputType.fromValue(getIntent().getIntExtra(OUTPUT_TYPE_KEY, 0));
+        includeThumb = getIntent().getBooleanExtra(INCLUDE_THUMB_KEY, false);
+
+        cleanupExpiredTemporaryFiles();
 
         Display display = getWindowManager().getDefaultDisplay();
         int width = display.getWidth();
@@ -340,6 +351,32 @@ public class MultiImageChooserActivity extends AppCompatActivity implements
     private void updateAcceptButton() {
         if (abDoneView != null) {
             abDoneView.setEnabled(fileNames.size() != 0);
+        }
+    }
+
+    private void cleanupExpiredTemporaryFiles() {
+        File cacheDir = getCacheDir();
+        if (cacheDir == null) {
+            return;
+        }
+
+        long expirationTime = System.currentTimeMillis() - CDV_TEMP_FILE_MAX_AGE_MS;
+        File[] files = cacheDir.listFiles();
+        if (files == null) {
+            return;
+        }
+
+        for (File file : files) {
+            String name = file.getName();
+            if (!(name.startsWith(CDV_PHOTO_PREFIX) || name.startsWith(CDV_THUMB_PREFIX))) {
+                continue;
+            }
+
+            if (file.lastModified() >= expirationTime) {
+                continue;
+            }
+
+            file.delete();
         }
     }
 
@@ -571,6 +608,7 @@ public class MultiImageChooserActivity extends AppCompatActivity implements
 
     private class ResizeImagesTask extends AsyncTask<Set<Entry<String, Integer>>, Void, ArrayList<String>> {
         private Exception asyncTaskError = null;
+        private final ArrayList<String> thumbResults = new ArrayList<String>();
 
         @Override
         protected ArrayList<String> doInBackground(Set<Entry<String, Integer>>... fileSets) {
@@ -580,6 +618,7 @@ public class MultiImageChooserActivity extends AppCompatActivity implements
                 Iterator<Entry<String, Integer>> i = fileNames.iterator();
                 Bitmap bmp;
                 while (i.hasNext()) {
+                    Bitmap thumbBitmap = null;
                     Entry<String, Integer> imageInfo = i.next();
                     File file = new File(imageInfo.getKey());
                     int rotate = imageInfo.getValue();
@@ -630,12 +669,35 @@ public class MultiImageChooserActivity extends AppCompatActivity implements
                         }
                     }
 
-                    if (outputType == OutputType.FILE_URI) {
-                        file = storeImage(bmp, file.getName());
-                        al.add(Uri.fromFile(file).toString());
+                    try {
+                        if (outputType == OutputType.FILE_URI) {
+                            file = storeImage(bmp, file.getName(), CDV_PHOTO_PREFIX, quality);
+                            al.add(Uri.fromFile(file).toString());
 
-                    } else if (outputType == OutputType.BASE64_STRING) {
-                        al.add(getBase64OfImage(bmp));
+                        } else if (outputType == OutputType.BASE64_STRING) {
+                            al.add(getBase64OfImage(bmp, quality));
+                        }
+
+                        if (includeThumb) {
+                            thumbBitmap = createThumbnailBitmap(bmp);
+                            int thumbQuality = getThumbQuality();
+
+                            if (thumbBitmap == null) {
+                                thumbResults.add(null);
+                            } else if (outputType == OutputType.FILE_URI) {
+                                File thumbFile = storeImage(thumbBitmap, file.getName(), CDV_THUMB_PREFIX, thumbQuality);
+                                thumbResults.add(Uri.fromFile(thumbFile).toString());
+                            } else {
+                                thumbResults.add(getBase64OfImage(thumbBitmap, thumbQuality));
+                            }
+                        }
+                    } finally {
+                        if (thumbBitmap != null && thumbBitmap != bmp && !thumbBitmap.isRecycled()) {
+                            thumbBitmap.recycle();
+                        }
+                        if (bmp != null && !bmp.isRecycled()) {
+                            bmp.recycle();
+                        }
                     }
                 }
                 return al;
@@ -667,6 +729,9 @@ public class MultiImageChooserActivity extends AppCompatActivity implements
             } else if (al.size() > 0) {
                 Bundle res = new Bundle();
                 res.putStringArrayList("MULTIPLEFILENAMES", al);
+                if (includeThumb) {
+                    res.putStringArrayList("MULTIPLETHUMBS", thumbResults);
+                }
 
                 if (imagecursor != null) {
                     res.putInt("TOTALFILES", imagecursor.getCount());
@@ -701,13 +766,21 @@ public class MultiImageChooserActivity extends AppCompatActivity implements
 
             if (options != null && shouldScale) {
                 float scale = calculateScale(options.outWidth, options.outHeight);
-                bmp = this.getResizedBitmap(bmp, scale);
+                Bitmap scaled = this.getResizedBitmap(bmp, scale);
+                if (scaled != bmp && !bmp.isRecycled()) {
+                    bmp.recycle();
+                }
+                bmp = scaled;
             }
 
             if (rotate != 0) {
                 Matrix matrix = new Matrix();
                 matrix.setRotate(rotate);
-                bmp = Bitmap.createBitmap(bmp, 0, 0, bmp.getWidth(), bmp.getHeight(), matrix, true);
+                Bitmap rotated = Bitmap.createBitmap(bmp, 0, 0, bmp.getWidth(), bmp.getHeight(), matrix, true);
+                if (rotated != bmp && !bmp.isRecycled()) {
+                    bmp.recycle();
+                }
+                bmp = rotated;
             }
 
             return bmp;
@@ -722,17 +795,19 @@ public class MultiImageChooserActivity extends AppCompatActivity implements
         * The software is open source, MIT Licensed.
         * Copyright (C) 2012, webXells GmbH All Rights Reserved.
         */
-        private File storeImage(Bitmap bmp, String fileName) throws IOException {
+        private File storeImage(Bitmap bmp, String fileName, String prefix, int compressionQuality) throws IOException {
             int index = fileName.lastIndexOf('.');
             String name = fileName.substring(0, index);
             String ext = fileName.substring(index);
-            File file = File.createTempFile("tmp_" + name, ext);
+            File file = File.createTempFile(prefix + name, ext, getCacheDir());
             OutputStream outStream = new FileOutputStream(file);
 
+            int safeQuality = Math.max(0, Math.min(100, compressionQuality));
+
             if (ext.compareToIgnoreCase(".png") == 0) {
-                bmp.compress(Bitmap.CompressFormat.PNG, quality, outStream);
+                bmp.compress(Bitmap.CompressFormat.PNG, safeQuality, outStream);
             } else {
-                bmp.compress(Bitmap.CompressFormat.JPEG, quality, outStream);
+                bmp.compress(Bitmap.CompressFormat.JPEG, safeQuality, outStream);
             }
 
             outStream.flush();
@@ -740,7 +815,34 @@ public class MultiImageChooserActivity extends AppCompatActivity implements
             return file;
         }
 
+        private Bitmap createThumbnailBitmap(Bitmap source) {
+            if (source == null) {
+                return null;
+            }
+
+            int width = source.getWidth();
+            int height = source.getHeight();
+            int longestSide = Math.max(width, height);
+            if (longestSide <= THUMB_MAX_SIZE) {
+                return source;
+            }
+
+            float scale = (float) THUMB_MAX_SIZE / (float) longestSide;
+            int targetWidth = Math.max(1, Math.round(width * scale));
+            int targetHeight = Math.max(1, Math.round(height * scale));
+            return Bitmap.createScaledBitmap(source, targetWidth, targetHeight, true);
+        }
+
+        private int getThumbQuality() {
+            int safeQuality = Math.max(0, Math.min(100, quality));
+            return Math.min(safeQuality, THUMB_MAX_QUALITY);
+        }
+
         private Bitmap getResizedBitmap(Bitmap bm, float factor) {
+            if (factor >= 0.999f) {
+                return bm;
+            }
+
             int width = bm.getWidth();
             int height = bm.getHeight();
             // create a matrix for the manipulation
@@ -751,9 +853,10 @@ public class MultiImageChooserActivity extends AppCompatActivity implements
             return Bitmap.createBitmap(bm, 0, 0, width, height, matrix, false);
         }
 
-       private String getBase64OfImage(Bitmap bm) {
+       private String getBase64OfImage(Bitmap bm, int compressionQuality) {
             ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
-            bm.compress(Bitmap.CompressFormat.JPEG, quality, byteArrayOutputStream);
+            int safeQuality = Math.max(0, Math.min(100, compressionQuality));
+            bm.compress(Bitmap.CompressFormat.JPEG, safeQuality, byteArrayOutputStream);
             byte[] byteArray = byteArrayOutputStream.toByteArray();
             return Base64.encodeToString(byteArray, Base64.NO_WRAP);
         }

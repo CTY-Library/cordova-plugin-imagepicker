@@ -24,7 +24,7 @@
     image_fullsize = nil;
     
     be_saving_img = false;
-    be_saving_img_thumb;
+    be_saving_img_thumb = false;
     
     return self;
 }

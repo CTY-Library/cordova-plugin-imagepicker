@@ -57,6 +57,7 @@ public class ImagePicker extends CordovaPlugin {
             int desiredHeight = 0;
             int quality = 100;
             int outputType = 0;
+            boolean includeThumb = false;
             if (params.has("maximumImagesCount")) {
                 max = params.getInt("maximumImagesCount");
             }
@@ -72,12 +73,16 @@ public class ImagePicker extends CordovaPlugin {
             if (params.has("outputType")) {
                 outputType = params.getInt("outputType");
             }
+            if (params.has("includeThumb")) {
+                includeThumb = params.getBoolean("includeThumb");
+            }
 
             imagePickerIntent.putExtra("MAX_IMAGES", max);
             imagePickerIntent.putExtra("WIDTH", desiredWidth);
             imagePickerIntent.putExtra("HEIGHT", desiredHeight);
             imagePickerIntent.putExtra("QUALITY", quality);
             imagePickerIntent.putExtra("OUTPUT_TYPE", outputType);
+            imagePickerIntent.putExtra("INCLUDE_THUMB", includeThumb);
 
             // some day, when everybody uses a cordova version supporting 'hasPermission', enable this:
             /*
@@ -138,15 +143,43 @@ public class ImagePicker extends CordovaPlugin {
         if (resultCode == Activity.RESULT_OK && data != null) {
             int sync = data.getIntExtra("bigdata:synccode", -1);
             final Bundle bigData = ResultIPC.get().getLargeData(sync);
+            if (bigData == null) {
+                callbackContext.error("Failed to read picker result");
+                return;
+            }
 
             ArrayList<String> fileNames = bigData.getStringArrayList("MULTIPLEFILENAMES");
+            ArrayList<String> thumbs = bigData.getStringArrayList("MULTIPLETHUMBS");
+            if (fileNames == null) {
+                callbackContext.error("No images selected");
+                return;
+            }
 
-            JSONArray res = new JSONArray(fileNames);
+            JSONArray res;
+            if (thumbs != null && thumbs.size() == fileNames.size()) {
+                res = new JSONArray();
+                try {
+                    for (int i = 0; i < fileNames.size(); i++) {
+                        JSONObject entry = new JSONObject();
+                        entry.put("uri", fileNames.get(i));
+                        if (thumbs.get(i) != null) {
+                            entry.put("thumb", thumbs.get(i));
+                        }
+                        res.put(entry);
+                    }
+                } catch (JSONException e) {
+                    callbackContext.error("Failed to build picker response");
+                    return;
+                }
+            } else {
+                res = new JSONArray(fileNames);
+            }
+
             callbackContext.success(res);
 
         } else if (resultCode == Activity.RESULT_CANCELED && data != null) {
             String error = data.getStringExtra("ERRORMESSAGE");
-            callbackContext.error(error);
+            callbackContext.error(error != null ? error : "No images selected");
 
         } else if (resultCode == Activity.RESULT_CANCELED) {
             JSONArray res = new JSONArray();

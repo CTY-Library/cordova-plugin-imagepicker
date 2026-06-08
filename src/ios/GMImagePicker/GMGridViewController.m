@@ -19,6 +19,7 @@
 
 #define CDV_PHOTO_PREFIX @"cdv_photo_"
 #define CDV_THUMB_PREFIX @"cdv_thumb_"
+#define CDV_THUMBNAIL_SCALE_CAP 2.0f
 
 
 //Helper methods
@@ -82,6 +83,109 @@ NSString * const GMGridViewCellIdentifier = @"GMGridViewCellIdentifier";
 
 @synthesize dic_asset_fetches;
 
+- (BOOL)writeJPEGImage:(UIImage *)image quality:(CGFloat)quality toFile:(NSString *)filePath
+{
+    if (image == nil || filePath == nil) {
+        return NO;
+    }
+
+    UIImage *normalizedImage = [image fixOrientation];
+    NSData *jpegData = UIImageJPEGRepresentation(normalizedImage, quality);
+    if (jpegData == nil) {
+        return NO;
+    }
+
+    return [jpegData writeToFile:filePath atomically:YES];
+}
+
+- (PHAssetResource *)imageResourceForAsset:(PHAsset *)asset
+{
+    NSArray *resources = [PHAssetResource assetResourcesForAsset:asset];
+    for (PHAssetResource *resource in resources) {
+        if (resource.type == PHAssetResourceTypePhoto ||
+            resource.type == PHAssetResourceTypeFullSizePhoto ||
+            resource.type == PHAssetResourceTypeAlternatePhoto) {
+            return resource;
+        }
+    }
+
+    return resources.firstObject;
+}
+
+- (NSString *)temporaryFilePathWithPrefix:(NSString *)prefix counter:(int *)counter extension:(NSString *)pathExtension
+{
+    NSString *safeExtension = pathExtension.length > 0 ? pathExtension : @"jpg";
+    NSString *filePath;
+
+    do {
+        filePath = [NSString stringWithFormat:@"%@/%@%03d.%@", docsPath, prefix, (*counter)++, safeExtension];
+    } while ([fileMgr fileExistsAtPath:filePath]);
+
+    return filePath;
+}
+
+- (void)updateProgress:(double)progress forFetchItem:(GMFetchItem *)fetchItem collectionView:(UICollectionView *)collectionView indexPath:(NSIndexPath *)indexPath
+{
+    fetchItem.percent = progress;
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        GMGridViewCell *cell = (GMGridViewCell *)[collectionView cellForItemAtIndexPath:indexPath];
+        if (cell) {
+            [cell set_progress:progress animated:false];
+        }
+    });
+}
+
+- (void)exportOriginalImageAsset:(PHAsset *)asset fetchItem:(GMFetchItem *)fetchItem collectionView:(UICollectionView *)collectionView indexPath:(NSIndexPath *)indexPath
+{
+    PHAssetResource *resource = [self imageResourceForAsset:asset];
+    if (resource == nil) {
+        fetchItem.be_progressed = false;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            GMGridViewCell *cell = (GMGridViewCell *)[collectionView cellForItemAtIndexPath:indexPath];
+            if (cell) {
+                [cell hide_progress];
+            }
+        });
+        return;
+    }
+
+    NSString *filePath = [self temporaryFilePathWithPrefix:CDV_PHOTO_PREFIX
+                                                   counter:&docCount
+                                                 extension:[resource.originalFilename pathExtension]];
+
+    PHAssetResourceRequestOptions *options = [[PHAssetResourceRequestOptions alloc] init];
+    options.networkAccessAllowed = YES;
+    options.progressHandler = ^(double progress) {
+        [self updateProgress:progress forFetchItem:fetchItem collectionView:collectionView indexPath:indexPath];
+    };
+
+    [[PHAssetResourceManager defaultManager] writeDataForAssetResource:resource
+                                                                toFile:[NSURL fileURLWithPath:filePath]
+                                                               options:options
+                                                     completionHandler:^(NSError * _Nullable error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            fetchItem.be_progressed = false;
+
+            GMGridViewCell *cell = (GMGridViewCell *)[collectionView cellForItemAtIndexPath:indexPath];
+            if (cell) {
+                [cell hide_progress];
+            }
+
+            if (error != nil) {
+                return;
+            }
+
+            fetchItem.be_finished = true;
+            fetchItem.percent = 1.0;
+            fetchItem.image_fullsize = filePath;
+
+            [collectionView selectItemAtIndexPath:indexPath animated:NO scrollPosition:UICollectionViewScrollPositionNone];
+            [self collectionView:collectionView didSelectItemAtIndexPath:indexPath];
+        });
+    }];
+}
+
 -(id)initWithPicker:(GMImagePickerController *)picker
 {
     //Custom init. The picker contains custom information to create the FlowLayout
@@ -112,7 +216,7 @@ NSString * const GMGridViewCellIdentifier = @"GMGridViewCellIdentifier";
     if (self = [super initWithCollectionViewLayout:layout])
     {
         //Compute the thumbnail pixel size:
-        CGFloat scale = [UIScreen mainScreen].scale;
+        CGFloat scale = MIN([UIScreen mainScreen].scale, CDV_THUMBNAIL_SCALE_CAP);
         //NSLog(@"This is @%fx scale device", scale);
         AssetGridThumbnailSize = CGSizeMake(layout.itemSize.width * scale, layout.itemSize.height * scale);
         
@@ -186,7 +290,7 @@ NSString * const GMGridViewCellIdentifier = @"GMGridViewCellIdentifier";
     UICollectionViewFlowLayout *layout = [self collectionViewFlowLayoutForOrientation:toInterfaceOrientation];
     
     //Update the AssetGridThumbnailSize:
-    CGFloat scale = [UIScreen mainScreen].scale;
+    CGFloat scale = MIN([UIScreen mainScreen].scale, CDV_THUMBNAIL_SCALE_CAP);
     AssetGridThumbnailSize = CGSizeMake(layout.itemSize.width * scale, layout.itemSize.height * scale);
     
     [self resetCachedAssets];
@@ -395,21 +499,17 @@ NSString * const GMGridViewCellIdentifier = @"GMGridViewCellIdentifier";
                                           
                                           fetch_item.be_saving_img_thumb = true;
                                           
-                                          NSString * filePath;
-                                          do {
-                                              filePath = [NSString stringWithFormat:@"%@/%@%03d.%@", docsPath, CDV_THUMB_PREFIX, doc_thumbCount++, @"jpg"];
-                                          } while ([fileMgr fileExistsAtPath:filePath]);
+                                          NSString * filePath = [self temporaryFilePathWithPrefix:CDV_THUMB_PREFIX counter:&doc_thumbCount extension:@"jpg"];
                                           
                                           dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-                                              
-                                              fetch_item.be_saving_img_thumb = false;
-                                            
                                               // TODO pass in quality
-                                              if ( ![ UIImageJPEGRepresentation(result, 1.0f ) writeToFile:filePath atomically:YES ] ) {
+                                              if ( ![self writeJPEGImage:result quality:0.8f toFile:filePath] ) {
+                                                  fetch_item.be_saving_img_thumb = false;
                                                   return;
                                               }
                                               
                                               fetch_item.image_thumb = filePath;
+                                              fetch_item.be_saving_img_thumb = false;
                                               
                                           });
                                       }
@@ -452,6 +552,11 @@ NSString * const GMGridViewCellIdentifier = @"GMGridViewCellIdentifier";
         
         fetch_item.be_progressed = true;
         [ cell show_progress ];
+
+        if (asset.mediaType == PHAssetMediaTypeImage) {
+            [self exportOriginalImageAsset:asset fetchItem:fetch_item collectionView:collectionView indexPath:indexPath];
+            return NO;
+        }
         
         PHImageRequestOptions *ph_options = [[PHImageRequestOptions alloc] init];
         
@@ -489,11 +594,8 @@ NSString * const GMGridViewCellIdentifier = @"GMGridViewCellIdentifier";
             fetch_item.be_finished = true;
             
             //asset.image_fullsize = result;
-            
-            NSString * filePath;
-            do {
-                filePath = [NSString stringWithFormat:@"%@/%@%03d.%@", docsPath, CDV_PHOTO_PREFIX, docCount++, @"jpg"];
-            } while ([fileMgr fileExistsAtPath:filePath]);
+
+            NSString * filePath = [self temporaryFilePathWithPrefix:CDV_PHOTO_PREFIX counter:&docCount extension:@"jpg"];
             
             fetch_item.be_saving_img = true;
             
@@ -513,7 +615,15 @@ NSString * const GMGridViewCellIdentifier = @"GMGridViewCellIdentifier";
                 NSLog(@"corrected orientation: %ld",(UIImageOrientation)imageToDisplay.imageOrientation);
 
                 // setting compression to a low value (high compression) impact performance, but not actual img quality
-                if ( ![ UIImageJPEGRepresentation(imageToDisplay, 0.2f ) writeToFile:filePath atomically:YES ] ) {
+                if ( ![self writeJPEGImage:imageToDisplay quality:0.2f toFile:filePath] ) {
+                    fetch_item.be_saving_img = false;
+                    fetch_item.be_finished = false;
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        GMGridViewCell *failedCell = (GMGridViewCell *)[collectionView cellForItemAtIndexPath:indexPath];
+                        if (failedCell) {
+                            [failedCell hide_fetching];
+                        }
+                    });
                     return;
                 }
                 
