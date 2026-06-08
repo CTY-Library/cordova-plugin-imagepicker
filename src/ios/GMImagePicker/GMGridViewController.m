@@ -90,7 +90,7 @@ NSString * const GMGridViewCellIdentifier = @"GMGridViewCellIdentifier";
     }
 
     UIImage *normalizedImage = [image fixOrientation];
-    NSData *jpegData = [normalizedImage jpegDataWithCompressionQuality:quality];
+    NSData *jpegData = UIImageJPEGRepresentation(normalizedImage, quality);
     if (jpegData == nil) {
         return NO;
     }
