@@ -90,7 +90,7 @@ NSString * const GMGridViewCellIdentifier = @"GMGridViewCellIdentifier";
     }
 
     UIImage *normalizedImage = [image fixOrientation];
-    NSData *jpegData = UIImageJPEGRepresentation(normalizedImage, quality);
+    NSData *jpegData = [normalizedImage jpegDataWithCompressionQuality:quality];
     if (jpegData == nil) {
         return NO;
     }
@@ -489,13 +489,24 @@ NSString * const GMGridViewCellIdentifier = @"GMGridViewCellIdentifier";
                                     contentMode:PHImageContentModeAspectFill
                                         options:nil
                                   resultHandler:^(UIImage *result, NSDictionary *info) {
+                                      NSError *imageError = info[PHImageErrorKey];
+                                      BOOL isCancelled = [info[PHImageCancelledKey] boolValue];
+                                      BOOL isDegraded = [info[PHImageResultIsDegradedKey] boolValue];
+
+                                      if (imageError != nil || isCancelled || result == nil) {
+                                          return;
+                                      }
                                       
                                       // Only update the thumbnail if the cell tag hasn't changed. Otherwise, the cell has been re-used.
                                       if (cell.tag == currentTag) {
                                           [cell.imageView setImage:result];
                                       }
                                       
-                                      if ( fetch_item.be_saving_img_thumb==false && fetch_item.image_thumb == nil && result!= nil ) {
+                                      if (isDegraded) {
+                                          return;
+                                      }
+
+                                      if ( fetch_item.be_saving_img_thumb==false && fetch_item.image_thumb == nil ) {
                                           
                                           fetch_item.be_saving_img_thumb = true;
                                           
@@ -604,7 +615,7 @@ NSString * const GMGridViewCellIdentifier = @"GMGridViewCellIdentifier";
                 
                 // @BVL: Added orientation-fix to correctly display the returned result
                 
-//              if ( ![ UIImageJPEGRepresentation(result, 1.0f ) writeToFile:filePath atomically:YES ] ) {
+//              if ( ![[result fixOrientation] jpegDataWithCompressionQuality:1.0f] writeToFile:filePath atomically:YES ] ) {
 //                  return;
 //              }
                 
