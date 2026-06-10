@@ -107,14 +107,98 @@ Note that the `hasReadPermission` function will return true when:
   }
 
   function requestReadPermission() {
-    // no callbacks required as this opens a popup which returns async
-    window.imagePicker.requestReadPermission();
+        window.imagePicker.requestReadPermission(
+            function() {
+                // permission granted
+            },
+            function(error) {
+                // permission denied/restricted, see "Permission Error Codes" below
+                console.log(error);
+            }
+        );
   }
 ```
 
 Note that backward compatibility was added by checking for read permission automatically when `getPictures` is called.
 If permission is needed the plugin will now show the permission request popup.
 The user will then need to allow access and invoke the same method again after doing so.
+
+## Permission Error Codes
+
+For permission-related failures, `requestReadPermission` and `openAppSettings` return an error object with this shape:
+
+```js
+{
+    code: "SOME_ERROR_CODE",
+    message: "Human readable message"
+}
+```
+
+### Codes
+
+- `PERMISSION_DENIED_FIRST_TIME`
+    User denied the runtime permission request in the current flow. Usually do not force "Go to Settings" at this point.
+
+- `PERMISSION_DENIED_NEED_SETTINGS`
+    Permission is denied and the app should guide the user to app settings.
+
+- `PERMISSION_RESTRICTED`
+    iOS restricted state (for example parental controls or enterprise policy). Showing guidance is fine, but the user may be unable to change it.
+
+- `PERMISSION_STATE_UNRESOLVED`
+    iOS fallback for unexpected/unknown authorization states.
+
+- `OPEN_SETTINGS_FAILED`
+    Opening app settings failed.
+
+### Open App Settings
+
+Use `openAppSettings` when you receive `PERMISSION_DENIED_NEED_SETTINGS`.
+
+```js
+window.imagePicker.openAppSettings(
+    function() {
+        // settings screen opened
+    },
+    function(error) {
+        // e.g. { code: "OPEN_SETTINGS_FAILED", message: "..." }
+        console.log(error);
+    }
+);
+```
+
+### Recommended Frontend Flow
+
+```js
+window.imagePicker.hasReadPermission(function(hasPermission) {
+    if (hasPermission) {
+        // proceed to getPictures
+        return;
+    }
+
+    window.imagePicker.requestReadPermission(
+        function() {
+            // granted, proceed to getPictures
+        },
+        function(error) {
+            switch (error && error.code) {
+                case "PERMISSION_DENIED_NEED_SETTINGS":
+                    // show "Go to Settings" action and call openAppSettings()
+                    break;
+                case "PERMISSION_DENIED_FIRST_TIME":
+                    // show a simple denial hint, without forcing settings navigation
+                    break;
+                case "PERMISSION_RESTRICTED":
+                    // show restricted message
+                    break;
+                default:
+                    // fallback handling
+                    break;
+            }
+        }
+    );
+});
+```
 
 
 ## Libraries used

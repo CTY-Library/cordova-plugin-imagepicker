@@ -57,6 +57,35 @@ static BOOL SOSPickerHasPrefix(NSString *fileName)
     return [fileName hasPrefix:CDV_PHOTO_PREFIX] || [fileName hasPrefix:CDV_THUMB_PREFIX];
 }
 
+static BOOL SOSPickerPhotoAccessGranted(PHAuthorizationStatus status)
+{
+    if (status == PHAuthorizationStatusAuthorized) {
+        return YES;
+    }
+
+#if __IPHONE_OS_VERSION_MAX_ALLOWED >= 140000
+    if (@available(iOS 14.0, *)) {
+        if (status == PHAuthorizationStatusLimited) {
+            return YES;
+        }
+    }
+#endif
+
+    return NO;
+}
+
+static NSString * const SOSPickerErrorPermissionDeniedFirstTime = @"PERMISSION_DENIED_FIRST_TIME";
+static NSString * const SOSPickerErrorPermissionDeniedNeedSettings = @"PERMISSION_DENIED_NEED_SETTINGS";
+static NSString * const SOSPickerErrorPermissionRestricted = @"PERMISSION_RESTRICTED";
+static NSString * const SOSPickerErrorPermissionStateUnresolved = @"PERMISSION_STATE_UNRESOLVED";
+static NSString * const SOSPickerErrorOpenSettingsFailed = @"OPEN_SETTINGS_FAILED";
+
+static CDVPluginResult *SOSPickerPermissionErrorResult(NSString *code, NSString *message)
+{
+    NSDictionary *payload = @{ @"code": code, @"message": message };
+    return [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsDictionary:payload];
+}
+
 - (CGFloat)jpegCompressionQuality
 {
     CGFloat quality = self.quality / 100.0f;
@@ -300,7 +329,7 @@ static BOOL SOSPickerHasPrefix(NSString *fileName)
 }
 
 - (void) hasReadPermission:(CDVInvokedUrlCommand *)command {
-    CDVPluginResult* pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsBool:[PHPhotoLibrary authorizationStatus] == PHAuthorizationStatusAuthorized];
+    CDVPluginResult* pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsBool:SOSPickerPhotoAccessGranted([PHPhotoLibrary authorizationStatus])];
     [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
 }
 
@@ -310,7 +339,7 @@ static BOOL SOSPickerHasPrefix(NSString *fileName)
     // https://developer.apple.com/library/ios/documentation/Photos/Reference/PHPhotoLibrary_Class/
 
     PHAuthorizationStatus status = [PHPhotoLibrary authorizationStatus];
-    if (status == PHAuthorizationStatusAuthorized) {
+    if (SOSPickerPhotoAccessGranted(status)) {
         NSLog(@"Access has been granted.");
         
         CDVPluginResult* pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK];
@@ -318,20 +347,57 @@ static BOOL SOSPickerHasPrefix(NSString *fileName)
     } else if (status == PHAuthorizationStatusDenied) {
         NSString* message = @"Access has been denied. Change your setting > this app > Photo enable";
         NSLog(@"%@", message);
-        
-        CDVPluginResult* pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsString:message];
+
+        CDVPluginResult* pluginResult = SOSPickerPermissionErrorResult(SOSPickerErrorPermissionDeniedNeedSettings, message);
         [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
     } else if (status == PHAuthorizationStatusNotDetermined) {
         // Access has not been determined. requestAuthorization: is available
-        [PHPhotoLibrary requestAuthorization:^(PHAuthorizationStatus status) {}];
-        
-        CDVPluginResult* pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK];
-        [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
+        [PHPhotoLibrary requestAuthorization:^(PHAuthorizationStatus status) {
+            CDVPluginResult* pluginResult = nil;
+            if (SOSPickerPhotoAccessGranted(status)) {
+                pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK];
+            } else if (status == PHAuthorizationStatusDenied) {
+                pluginResult = SOSPickerPermissionErrorResult(SOSPickerErrorPermissionDeniedFirstTime, @"Access has been denied.");
+            } else if (status == PHAuthorizationStatusRestricted) {
+                pluginResult = SOSPickerPermissionErrorResult(SOSPickerErrorPermissionRestricted, @"Access has been restricted. Change your setting > Privacy > Photo enable");
+            } else {
+                pluginResult = SOSPickerPermissionErrorResult(SOSPickerErrorPermissionStateUnresolved, @"Photo permission request did not resolve to an authorized state.");
+            }
+
+            [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
+        }];
     } else if (status == PHAuthorizationStatusRestricted) {
         NSString* message = @"Access has been restricted. Change your setting > Privacy > Photo enable";
         NSLog(@"%@", message);
-        
-        CDVPluginResult* pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsString:message];
+
+        CDVPluginResult* pluginResult = SOSPickerPermissionErrorResult(SOSPickerErrorPermissionRestricted, message);
+        [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
+    }
+}
+
+- (void) openAppSettings:(CDVInvokedUrlCommand *)command {
+    NSURL *url = [NSURL URLWithString:UIApplicationOpenSettingsURLString];
+    if (url == nil) {
+        CDVPluginResult* pluginResult = SOSPickerPermissionErrorResult(SOSPickerErrorOpenSettingsFailed, @"Could not build app settings URL.");
+        [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
+        return;
+    }
+
+    if (@available(iOS 10.0, *)) {
+        [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:^(BOOL success) {
+            CDVPluginResult* pluginResult = success
+                ? [CDVPluginResult resultWithStatus:CDVCommandStatus_OK]
+                : SOSPickerPermissionErrorResult(SOSPickerErrorOpenSettingsFailed, @"Could not open app settings.");
+            [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
+        }];
+    } else {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        BOOL success = [[UIApplication sharedApplication] openURL:url];
+#pragma clang diagnostic pop
+        CDVPluginResult* pluginResult = success
+            ? [CDVPluginResult resultWithStatus:CDVCommandStatus_OK]
+            : SOSPickerPermissionErrorResult(SOSPickerErrorOpenSettingsFailed, @"Could not open app settings.");
         [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
     }
 }

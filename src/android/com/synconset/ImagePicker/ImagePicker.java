@@ -18,9 +18,11 @@ import android.Manifest;
 import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.content.Intent;
+import android.net.Uri;
 import android.content.pm.PackageManager;
 import android.os.Build;
 import android.os.Bundle;
+import android.provider.Settings;
 
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
@@ -31,9 +33,14 @@ public class ImagePicker extends CordovaPlugin {
     private static final String ACTION_GET_PICTURES = "getPictures";
     private static final String ACTION_HAS_READ_PERMISSION = "hasReadPermission";
     private static final String ACTION_REQUEST_READ_PERMISSION = "requestReadPermission";
+    private static final String ACTION_OPEN_APP_SETTINGS = "openAppSettings";
 
     private static final int PERMISSION_REQUEST_CODE_PICKER = 100;
     private static final int PERMISSION_REQUEST_CODE_ONLY = 101;
+
+    private static final String ERROR_PERMISSION_DENIED_FIRST_TIME = "PERMISSION_DENIED_FIRST_TIME";
+    private static final String ERROR_PERMISSION_DENIED_NEED_SETTINGS = "PERMISSION_DENIED_NEED_SETTINGS";
+    private static final String ERROR_OPEN_SETTINGS_FAILED = "OPEN_SETTINGS_FAILED";
 
     private CallbackContext callbackContext;
     private Intent pendingImagePickerIntent;
@@ -47,6 +54,10 @@ public class ImagePicker extends CordovaPlugin {
 
         } else if (ACTION_REQUEST_READ_PERMISSION.equals(action)) {
             requestReadPermission(PERMISSION_REQUEST_CODE_ONLY);
+            return true;
+
+        } else if (ACTION_OPEN_APP_SETTINGS.equals(action)) {
+            openAppSettings();
             return true;
 
         } else if (ACTION_GET_PICTURES.equals(action)) {
@@ -112,12 +123,33 @@ public class ImagePicker extends CordovaPlugin {
 
     @SuppressLint("InlinedApi")
     private boolean hasReadPermission() {
+        String readPermission = getReadPermission();
+        return Build.VERSION.SDK_INT < 23 ||
+                PackageManager.PERMISSION_GRANTED == ContextCompat.checkSelfPermission(this.cordova.getActivity(), readPermission);
+    }
+
+    @SuppressLint("InlinedApi")
+    private String getReadPermission() {
         if (android.os.Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            return   PackageManager.PERMISSION_GRANTED == ContextCompat.checkSelfPermission(this.cordova.getActivity(), Manifest.permission.READ_MEDIA_IMAGES);
+            return Manifest.permission.READ_MEDIA_IMAGES;
         }
-        else {
-            return Build.VERSION.SDK_INT < 23 ||
-                    PackageManager.PERMISSION_GRANTED == ContextCompat.checkSelfPermission(this.cordova.getActivity(), Manifest.permission.READ_EXTERNAL_STORAGE);
+
+        return Manifest.permission.READ_EXTERNAL_STORAGE;
+    }
+
+    private boolean shouldPromptToOpenSettings() {
+        String permission = getReadPermission();
+        return !ActivityCompat.shouldShowRequestPermissionRationale(cordova.getActivity(), permission);
+    }
+
+    private void sendPermissionError(String code, String message) {
+        JSONObject payload = new JSONObject();
+        try {
+            payload.put("code", code);
+            payload.put("message", message);
+            callbackContext.sendPluginResult(new PluginResult(PluginResult.Status.ERROR, payload));
+        } catch (JSONException e) {
+            callbackContext.error(code);
         }
     }
 
@@ -125,13 +157,7 @@ public class ImagePicker extends CordovaPlugin {
     private void requestReadPermission(int requestCode) {
         if (!hasReadPermission()) {
             List<String> permissions = new ArrayList<String>();
-            if (android.os.Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                // Android API 33 and higher
-                permissions.add(Manifest.permission.READ_MEDIA_IMAGES);
-            } else {
-                // Android API 32 or lower
-                permissions.add(Manifest.permission.READ_EXTERNAL_STORAGE);
-            }
+            permissions.add(getReadPermission());
             cordova.requestPermissions(this, requestCode, permissions.toArray(new String[0]));
             return;
         }
@@ -200,7 +226,12 @@ public class ImagePicker extends CordovaPlugin {
             if (granted && pendingImagePickerIntent != null) {
                 cordova.startActivityForResult(this, pendingImagePickerIntent, 0);
             } else {
-                callbackContext.error("Permission denied");
+                if (shouldPromptToOpenSettings()) {
+                    sendPermissionError(ERROR_PERMISSION_DENIED_NEED_SETTINGS,
+                            "Permission denied. Change your setting > this app > Photos and videos enable");
+                } else {
+                    sendPermissionError(ERROR_PERMISSION_DENIED_FIRST_TIME, "Permission denied");
+                }
             }
             pendingImagePickerIntent = null;
             return;
@@ -210,8 +241,27 @@ public class ImagePicker extends CordovaPlugin {
             if (granted) {
                 callbackContext.success();
             } else {
-                callbackContext.error("Permission denied");
+                if (shouldPromptToOpenSettings()) {
+                    sendPermissionError(ERROR_PERMISSION_DENIED_NEED_SETTINGS,
+                            "Permission denied. Change your setting > this app > Photos and videos enable");
+                } else {
+                    sendPermissionError(ERROR_PERMISSION_DENIED_FIRST_TIME, "Permission denied");
+                }
             }
+        }
+    }
+
+    private void openAppSettings() {
+        Intent intent = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+        Uri uri = Uri.fromParts("package", cordova.getActivity().getPackageName(), null);
+        intent.setData(uri);
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+
+        try {
+            cordova.getActivity().startActivity(intent);
+            callbackContext.success();
+        } catch (Exception e) {
+            sendPermissionError(ERROR_OPEN_SETTINGS_FAILED, "Could not open app settings.");
         }
     }
 

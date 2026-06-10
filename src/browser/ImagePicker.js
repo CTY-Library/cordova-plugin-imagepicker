@@ -57,6 +57,11 @@ async function requestReadPermission(successCallback, errorCallback, data) {
   successCallback();
 }
 
+//openAppSettings is not relevant in browsers, let's just return a success so everyone is happy
+async function openAppSettings(successCallback, errorCallback, data) {
+  successCallback();
+}
+
 function openImagePicker(maximumImagesCount, desiredWidth, desiredHeight, quality, outputType, allowVideo) {
   return new Promise((resolve, reject) => {
     let fileChooser = document.createElement('input');
@@ -207,7 +212,8 @@ function getDateTimeString() {
 module.exports = {
   getPictures: getPictures,
   hasReadPermission: hasReadPermission,
-  requestReadPermission: requestReadPermission
+  requestReadPermission: requestReadPermission,
+  openAppSettings: openAppSettings
 };
 
 require( "cordova/exec/proxy" ).add( "ImagePicker", module.exports );

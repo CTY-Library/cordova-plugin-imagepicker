@@ -16,6 +16,7 @@
 - (void) getPictures:(CDVInvokedUrlCommand *)command;
 - (void) hasReadPermission:(CDVInvokedUrlCommand *)command;
 - (void) requestReadPermission:(CDVInvokedUrlCommand *)command;
+- (void) openAppSettings:(CDVInvokedUrlCommand *)command;
 
 @property (nonatomic, assign) NSInteger width;
 @property (nonatomic, assign) NSInteger height;
