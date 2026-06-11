@@ -137,10 +137,10 @@ For permission-related failures, `requestReadPermission` and `openAppSettings` r
 ### Codes
 
 - `PERMISSION_DENIED_FIRST_TIME`
-    User denied the runtime permission request for the first time, or dismissed the permission dialog without an explicit choice. Usually do not force "Go to Settings" at this point.
+    Permission is denied but the app can still re-request permission in-app.
 
 - `PERMISSION_DENIED_NEED_SETTINGS`
-    Permission is still denied after at least one prior request, and the app should guide the user to app settings.
+    Permission cannot be resolved in the current flow (including dismissed dialog), and the app should guide the user to app settings.
 
 - `PERMISSION_RESTRICTED`
     iOS restricted state (for example parental controls or enterprise policy). Showing guidance is fine, but the user may be unable to change it.
