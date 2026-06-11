@@ -17,6 +17,7 @@ import java.util.List;
 import android.Manifest;
 import android.annotation.SuppressLint;
 import android.app.Activity;
+import android.content.Context;
 import android.content.Intent;
 import android.net.Uri;
 import android.content.pm.PackageManager;
@@ -37,6 +38,9 @@ public class ImagePicker extends CordovaPlugin {
 
     private static final int PERMISSION_REQUEST_CODE_PICKER = 100;
     private static final int PERMISSION_REQUEST_CODE_ONLY = 101;
+
+    private static final String PREFS_NAME = "cordova_image_picker";
+    private static final String PREF_KEY_READ_PERMISSION_REQUESTED = "read_permission_requested";
 
     private static final String ERROR_PERMISSION_DENIED_FIRST_TIME = "PERMISSION_DENIED_FIRST_TIME";
     private static final String ERROR_PERMISSION_DENIED_NEED_SETTINGS = "PERMISSION_DENIED_NEED_SETTINGS";
@@ -153,6 +157,34 @@ public class ImagePicker extends CordovaPlugin {
         }
     }
 
+    private boolean hasRequestedReadPermissionBefore() {
+        return cordova.getActivity()
+                .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .getBoolean(PREF_KEY_READ_PERMISSION_REQUESTED, false);
+    }
+
+    private void markReadPermissionRequested() {
+        cordova.getActivity()
+                .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean(PREF_KEY_READ_PERMISSION_REQUESTED, true)
+                .apply();
+    }
+
+    private void sendDeniedResult(boolean hasGrantResult, boolean requestedBefore) {
+        if (!hasGrantResult) {
+            sendPermissionError(ERROR_PERMISSION_DENIED_FIRST_TIME, "Permission dialog was dismissed");
+            return;
+        }
+
+        if (requestedBefore && shouldPromptToOpenSettings()) {
+            sendPermissionError(ERROR_PERMISSION_DENIED_NEED_SETTINGS,
+                    "Permission denied. Change your setting > this app > Photos and videos enable");
+        } else {
+            sendPermissionError(ERROR_PERMISSION_DENIED_FIRST_TIME, "Permission denied");
+        }
+    }
+
     @SuppressLint("InlinedApi")
     private void requestReadPermission(int requestCode) {
         if (!hasReadPermission()) {
@@ -220,18 +252,19 @@ public class ImagePicker extends CordovaPlugin {
     public void onRequestPermissionResult(int requestCode,
                                           String[] permissions,
                                           int[] grantResults) throws JSONException {
-        boolean granted = grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED;
+        boolean hasGrantResult = grantResults != null && grantResults.length > 0;
+        boolean granted = hasGrantResult && grantResults[0] == PackageManager.PERMISSION_GRANTED;
+        boolean requestedBefore = hasRequestedReadPermissionBefore();
+
+        if (requestCode == PERMISSION_REQUEST_CODE_PICKER || requestCode == PERMISSION_REQUEST_CODE_ONLY) {
+            markReadPermissionRequested();
+        }
 
         if (requestCode == PERMISSION_REQUEST_CODE_PICKER) {
             if (granted && pendingImagePickerIntent != null) {
                 cordova.startActivityForResult(this, pendingImagePickerIntent, 0);
             } else {
-                if (shouldPromptToOpenSettings()) {
-                    sendPermissionError(ERROR_PERMISSION_DENIED_NEED_SETTINGS,
-                            "Permission denied. Change your setting > this app > Photos and videos enable");
-                } else {
-                    sendPermissionError(ERROR_PERMISSION_DENIED_FIRST_TIME, "Permission denied");
-                }
+                sendDeniedResult(hasGrantResult, requestedBefore);
             }
             pendingImagePickerIntent = null;
             return;
@@ -241,12 +274,7 @@ public class ImagePicker extends CordovaPlugin {
             if (granted) {
                 callbackContext.success();
             } else {
-                if (shouldPromptToOpenSettings()) {
-                    sendPermissionError(ERROR_PERMISSION_DENIED_NEED_SETTINGS,
-                            "Permission denied. Change your setting > this app > Photos and videos enable");
-                } else {
-                    sendPermissionError(ERROR_PERMISSION_DENIED_FIRST_TIME, "Permission denied");
-                }
+                sendDeniedResult(hasGrantResult, requestedBefore);
             }
         }
     }
