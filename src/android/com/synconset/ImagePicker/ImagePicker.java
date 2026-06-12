@@ -154,7 +154,10 @@ public class ImagePicker extends CordovaPlugin {
     }
 
     private void sendDeniedResult(boolean hasGrantResult) {
-        if (!hasGrantResult || shouldPromptToOpenSettings()) {
+        if (!hasGrantResult) {
+            sendPermissionError(ERROR_PERMISSION_DENIED_FIRST_TIME,
+                    "Permission request dismissed");
+        } else if (shouldPromptToOpenSettings()) {
             sendPermissionError(ERROR_PERMISSION_DENIED_NEED_SETTINGS,
                     "Permission denied. Change your setting > this app > Photos and videos enable");
         } else {
